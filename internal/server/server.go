@@ -3,9 +3,8 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"strings"
+	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/portertech/skills-mcp-server/internal/registry"
@@ -43,71 +42,41 @@ func New(reg *registry.Registry, logger *slog.Logger) *Server {
 		logger:   logger,
 	}
 
-	s.registerSkillTools()
+	s.registerSkillPrompts()
 
 	return s
 }
 
-// registerSkillTools registers each skill as an MCP tool.
-func (s *Server) registerSkillTools() {
+// registerSkillPrompts registers each skill as an MCP prompt.
+func (s *Server) registerSkillPrompts() {
 	for _, sk := range s.registry.List() {
-		s.registerSkillTool(sk)
+		s.registerSkillPrompt(sk)
 	}
 }
 
-// SkillInput is the input type for skill tools (empty, no arguments needed).
-type SkillInput struct{}
+// registerSkillPrompt registers a single skill as an MCP prompt.
+func (s *Server) registerSkillPrompt(sk *skill.Skill) {
+	promptName := registry.ToolNameForSkill(sk.Name)
 
-// SkillOutput is the output type for skill tools.
-type SkillOutput struct {
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Instructions string `json:"instructions"`
-	Path         string `json:"path"`
-}
-
-// registerSkillTool registers a single skill as an MCP tool.
-func (s *Server) registerSkillTool(sk *skill.Skill) {
-	toolName := registry.ToolNameForSkill(sk.Name)
-
-	tool := &mcp.Tool{
-		Name:        toolName,
+	prompt := &mcp.Prompt{
+		Name:        promptName,
 		Description: sk.Description,
 	}
 
-	handler := func(ctx context.Context, req *mcp.CallToolRequest, input SkillInput) (*mcp.CallToolResult, SkillOutput, error) {
-		output := SkillOutput{
-			Name:         sk.Name,
-			Description:  sk.Description,
-			Instructions: sk.Instructions,
-			Path:         sk.Path,
-		}
-
-		result := &mcp.CallToolResult{
-			Content: []mcp.Content{
-				&mcp.TextContent{
-					Text: formatSkillResponse(sk),
+	handler := func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		return &mcp.GetPromptResult{
+			Description: sk.Description,
+			Messages: []*mcp.PromptMessage{
+				{
+					Role:    "user",
+					Content: &mcp.TextContent{Text: sk.Instructions},
 				},
 			},
-		}
-
-		return result, output, nil
+		}, nil
 	}
 
-	mcp.AddTool(s.mcp, tool, handler)
-	s.logger.Debug("registered skill tool", "name", toolName, "skill", sk.Name)
-}
-
-// formatSkillResponse formats a skill as a text response.
-func formatSkillResponse(sk *skill.Skill) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("# Skill: %s\n\n", sk.Name))
-	sb.WriteString(fmt.Sprintf("**Description:** %s\n\n", sk.Description))
-	sb.WriteString("---\n\n")
-	sb.WriteString(sk.Instructions)
-
-	return sb.String()
+	s.mcp.AddPrompt(prompt, handler)
+	s.logger.Debug("registered skill prompt", "name", promptName, "skill", sk.Name)
 }
 
 // Run starts the MCP server with stdio transport.
@@ -117,6 +86,38 @@ func (s *Server) Run(ctx context.Context) error {
 		"skills_root", s.registry.Root(),
 	)
 	return s.mcp.Run(ctx, &mcp.StdioTransport{})
+}
+
+// RunHTTP starts the MCP server with Streamable HTTP transport.
+func (s *Server) RunHTTP(ctx context.Context, addr string) error {
+	s.logger.Info("starting skills MCP server (HTTP)",
+		"skills_count", s.registry.Count(),
+		"skills_root", s.registry.Root(),
+		"addr", addr,
+	)
+	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return s.mcp
+	}, nil)
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.logger.Debug("request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+			handler.ServeHTTP(w, r)
+		}),
+	}
+	go func() {
+		<-ctx.Done()
+		s.logger.Info("shutting down HTTP server")
+		if err := httpServer.Shutdown(context.Background()); err != nil {
+			s.logger.Error("shutdown error", "error", err)
+		}
+		s.logger.Info("HTTP server stopped")
+	}()
+	s.logger.Info("HTTP server listening", "url", "http://"+addr)
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
 // RunWithTransport starts the MCP server with a custom transport.

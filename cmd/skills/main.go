@@ -24,11 +24,15 @@ func main() {
 		listSkills  bool
 		verbose     bool
 		showVersion bool
+		useHTTP     bool
+		httpAddr    string
 	)
 
 	flag.BoolVar(&listSkills, "list", false, "List discovered skills and exit")
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+	flag.BoolVar(&useHTTP, "http", false, "Use HTTP transport instead of stdio")
+	flag.StringVar(&httpAddr, "addr", ":8080", "HTTP listen address (used with --http)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] [skills_root]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "An MCP server that exposes Claude-compatible skills as tools.\n\n")
@@ -100,8 +104,14 @@ func main() {
 	}()
 
 	srv := server.New(reg, logger)
-	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
-		logger.Error("server error", "error", err)
+	var runErr error
+	if useHTTP {
+		runErr = srv.RunHTTP(ctx, httpAddr)
+	} else {
+		runErr = srv.Run(ctx)
+	}
+	if runErr != nil && ctx.Err() == nil {
+		logger.Error("server error", "error", runErr)
 		os.Exit(1)
 	}
 }
