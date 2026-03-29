@@ -106,6 +106,9 @@ Skills are directories containing a `SKILL.md` file with YAML frontmatter:
 ---
 name: my-skill
 description: A brief description of what this skill does
+references:
+  - checklist.md
+  - templates/pr-template.md
 ---
 
 # My Skill
@@ -123,6 +126,23 @@ Detailed instructions for the AI to follow when using this skill.
 
 - `name`: Unique skill identifier
 - `description`: Brief description shown in tool listings
+
+### Optional Fields
+
+- `references`: List of relative file paths within the skill directory. These files are exposed as MCP Resources that agents can read on demand.
+
+### References (Lazy Loading)
+
+Reference files are registered as MCP Resources with URIs in the form `skill://{skill-name}/{path}`. When a skill is invoked, the prompt response includes the list of available URIs. The agent can then call `ReadResource` to fetch only the files it actually needs.
+
+```
+~/.skills/
+└── code-review/
+    ├── SKILL.md        ← references checklist.md
+    └── checklist.md    ← exposed as skill://code-review/checklist.md
+```
+
+Reference paths must be relative and cannot escape the skill directory (no `..` traversal).
 
 ## How It Works
 

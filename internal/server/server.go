@@ -3,8 +3,11 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/portertech/skills-mcp-server/internal/registry"
@@ -43,6 +46,7 @@ func New(reg *registry.Registry, logger *slog.Logger) *Server {
 	}
 
 	s.registerSkillPrompts()
+	s.registerAllSkillResources()
 
 	return s
 }
@@ -52,6 +56,20 @@ func (s *Server) registerSkillPrompts() {
 	for _, sk := range s.registry.List() {
 		s.registerSkillPrompt(sk)
 	}
+}
+
+// formatSkillResponse formats a skill's content as a markdown response.
+func formatSkillResponse(sk *skill.Skill) string {
+	text := fmt.Sprintf("# Skill: %s\n\n**Description:** %s\n\n---\n\n%s", sk.Name, sk.Description, sk.Instructions)
+	if len(sk.References) > 0 {
+		text += "\n\n---\n\n## Available References\n"
+		for _, ref := range sk.References {
+			uri := fmt.Sprintf("skill://%s/%s", sk.Name, ref)
+			text += fmt.Sprintf("- `%s`\n", uri)
+		}
+		text += "\nUse ReadResource to read any of these files when needed."
+	}
+	return text
 }
 
 // registerSkillPrompt registers a single skill as an MCP prompt.
@@ -64,12 +82,18 @@ func (s *Server) registerSkillPrompt(sk *skill.Skill) {
 	}
 
 	handler := func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		instructions, err := registry.LoadSkillInstructions(filepath.Join(sk.Path, registry.SkillFileName))
+		if err != nil {
+			return nil, fmt.Errorf("load skill %q: %w", sk.Name, err)
+		}
+		filled := *sk
+		filled.Instructions = instructions
 		return &mcp.GetPromptResult{
 			Description: sk.Description,
 			Messages: []*mcp.PromptMessage{
 				{
 					Role:    "user",
-					Content: &mcp.TextContent{Text: sk.Instructions},
+					Content: &mcp.TextContent{Text: formatSkillResponse(&filled)},
 				},
 			},
 		}, nil
@@ -77,6 +101,45 @@ func (s *Server) registerSkillPrompt(sk *skill.Skill) {
 
 	s.mcp.AddPrompt(prompt, handler)
 	s.logger.Debug("registered skill prompt", "name", promptName, "skill", sk.Name)
+}
+
+// registerAllSkillResources registers MCP resources for all skill reference files.
+func (s *Server) registerAllSkillResources() {
+	for _, sk := range s.registry.List() {
+		s.registerSkillResources(sk)
+	}
+}
+
+// registerSkillResources registers MCP resources for a skill's reference files.
+func (s *Server) registerSkillResources(sk *skill.Skill) {
+	for _, refPath := range sk.References {
+		absPath := filepath.Join(sk.Path, refPath)
+		uri := fmt.Sprintf("skill://%s/%s", sk.Name, refPath)
+
+		resource := &mcp.Resource{
+			URI:         uri,
+			Name:        refPath,
+			Description: fmt.Sprintf("Reference file for skill: %s", sk.Name),
+			MIMEType:    "text/plain",
+		}
+
+		capturedAbsPath := absPath
+		capturedURI := uri
+		handler := func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+			data, err := os.ReadFile(capturedAbsPath)
+			if err != nil {
+				return nil, mcp.ResourceNotFoundError(capturedURI)
+			}
+			return &mcp.ReadResourceResult{
+				Contents: []*mcp.ResourceContents{
+					{URI: capturedURI, MIMEType: "text/plain", Text: string(data)},
+				},
+			}, nil
+		}
+
+		s.mcp.AddResource(resource, handler)
+		s.logger.Debug("registered skill resource", "uri", uri, "skill", sk.Name)
+	}
 }
 
 // Run starts the MCP server with stdio transport.

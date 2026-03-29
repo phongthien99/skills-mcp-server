@@ -111,6 +111,127 @@ Content.
 	}
 }
 
+func TestParseSkillMDReferences(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillPath := filepath.Join(tmpDir, "SKILL.md")
+
+	// Create reference files
+	if err := os.WriteFile(filepath.Join(tmpDir, "checklist.md"), []byte("- item1\n"), 0644); err != nil {
+		t.Fatalf("failed to write checklist: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "templates"), 0755); err != nil {
+		t.Fatalf("failed to create templates dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "templates", "pr.md"), []byte("PR template\n"), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+
+	content := `---
+name: code-review
+description: Review code
+references:
+  - checklist.md
+  - templates/pr.md
+---
+
+Review carefully.
+`
+	if err := os.WriteFile(skillPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write skill: %v", err)
+	}
+
+	sk, err := ParseSkillMD(skillPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(sk.References) != 2 {
+		t.Fatalf("expected 2 references, got %d", len(sk.References))
+	}
+	if sk.References[0] != "checklist.md" {
+		t.Errorf("references[0] = %q, want %q", sk.References[0], "checklist.md")
+	}
+	if sk.References[1] != "templates/pr.md" {
+		t.Errorf("references[1] = %q, want %q", sk.References[1], "templates/pr.md")
+	}
+}
+
+func TestParseSkillMDNoReferences(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillPath := filepath.Join(tmpDir, "SKILL.md")
+
+	content := `---
+name: simple
+description: A simple skill
+---
+
+Instructions.
+`
+	if err := os.WriteFile(skillPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write skill: %v", err)
+	}
+
+	sk, err := ParseSkillMD(skillPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sk.References) != 0 {
+		t.Errorf("expected no references, got %v", sk.References)
+	}
+}
+
+func TestParseSkillMDRefAbsPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillPath := filepath.Join(tmpDir, "SKILL.md")
+
+	content := `---
+name: bad-skill
+description: Uses absolute path
+references:
+  - /etc/passwd
+---
+
+Instructions.
+`
+	if err := os.WriteFile(skillPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write skill: %v", err)
+	}
+
+	_, err := ParseSkillMD(skillPath)
+	if err == nil {
+		t.Fatal("expected error for absolute reference path, got nil")
+	}
+	if !errors.Is(err, ErrRefAbsPath) {
+		t.Errorf("expected ErrRefAbsPath, got %v", err)
+	}
+}
+
+func TestParseSkillMDRefPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillPath := filepath.Join(tmpDir, "SKILL.md")
+
+	content := `---
+name: bad-skill
+description: Uses path traversal
+references:
+  - ../other-skill/secret.md
+---
+
+Instructions.
+`
+	if err := os.WriteFile(skillPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write skill: %v", err)
+	}
+
+	_, err := ParseSkillMD(skillPath)
+	if err == nil {
+		t.Fatal("expected error for path traversal, got nil")
+	}
+	if !errors.Is(err, ErrRefPathTraversal) {
+		t.Errorf("expected ErrRefPathTraversal, got %v", err)
+	}
+}
+
 func TestParseSkillMDFileTooLarge(t *testing.T) {
 	tmpDir := t.TempDir()
 	skillPath := filepath.Join(tmpDir, "SKILL.md")

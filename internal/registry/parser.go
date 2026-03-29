@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/portertech/skills-mcp-server/pkg/skill"
 	"gopkg.in/yaml.v3"
 )
+
+// SkillFileName is the conventional filename for skill definitions.
+const SkillFileName = "SKILL.md"
 
 var (
 	// ErrNoFrontmatter is returned when a SKILL.md file lacks YAML frontmatter.
@@ -21,6 +25,10 @@ var (
 	ErrMissingDesc = errors.New("skill description is required")
 	// ErrFileTooLarge is returned when a SKILL.md file exceeds MaxSkillFileSize.
 	ErrFileTooLarge = errors.New("skill file exceeds maximum size")
+	// ErrRefAbsPath is returned when a reference path is absolute instead of relative.
+	ErrRefAbsPath = errors.New("reference path must be relative")
+	// ErrRefPathTraversal is returned when a reference path escapes the skill directory.
+	ErrRefPathTraversal = errors.New("reference path must not escape skill directory")
 )
 
 // MaxSkillFileSize is the maximum allowed size for a SKILL.md file (64KB).
@@ -102,5 +110,28 @@ func ParseSkillMD(path string) (*skill.Skill, error) {
 
 	s.Instructions = strings.TrimSpace(content.String())
 
+	skillDir := filepath.Dir(path)
+	for _, ref := range s.References {
+		if filepath.IsAbs(ref) {
+			return nil, fmt.Errorf("%w: %s", ErrRefAbsPath, ref)
+		}
+		absRef := filepath.Join(skillDir, ref)
+		rel, err := filepath.Rel(skillDir, absRef)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return nil, fmt.Errorf("%w: %s", ErrRefPathTraversal, ref)
+		}
+	}
+
 	return &s, nil
+}
+
+// LoadSkillInstructions reads the markdown instructions from a SKILL.md file.
+// It is used for lazy loading: the registry stores only metadata at scan time,
+// and the full content is read on demand when a skill is actually requested.
+func LoadSkillInstructions(path string) (string, error) {
+	s, err := ParseSkillMD(path)
+	if err != nil {
+		return "", err
+	}
+	return s.Instructions, nil
 }

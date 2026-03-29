@@ -85,8 +85,71 @@ func TestFormatSkillResponse(t *testing.T) {
 	}
 }
 
+func TestFormatSkillResponseWithReferences(t *testing.T) {
+	sk := &pkgskill.Skill{
+		Name:         "code-review",
+		Description:  "Review code",
+		Instructions: "Follow the guidelines.",
+		Path:         "/path/to/skill",
+		References:   []string{"checklist.md", "templates/pr-template.md"},
+	}
+
+	response := formatSkillResponse(sk)
+
+	if !strings.Contains(response, "## Available References") {
+		t.Error("response missing references section")
+	}
+	if !strings.Contains(response, "skill://code-review/checklist.md") {
+		t.Error("response missing checklist.md URI")
+	}
+	if !strings.Contains(response, "skill://code-review/templates/pr-template.md") {
+		t.Error("response missing pr-template.md URI")
+	}
+	if !strings.Contains(response, "Use ReadResource") {
+		t.Error("response missing ReadResource instruction")
+	}
+}
+
+func TestFormatSkillResponseNoReferences(t *testing.T) {
+	sk := &pkgskill.Skill{
+		Name:         "simple",
+		Description:  "Simple skill",
+		Instructions: "Do it simply.",
+	}
+
+	response := formatSkillResponse(sk)
+
+	if strings.Contains(response, "Available References") {
+		t.Error("response should not have references section when none defined")
+	}
+}
+
+func newTestServer(t *testing.T, skillsDir string) *Server {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	reg := registry.NewRegistry(skillsDir, logger)
+	if err := reg.Scan(); err != nil {
+		t.Fatalf("Scan() error: %v", err)
+	}
+	return New(reg, logger)
+}
+
+func connectClient(t *testing.T, ctx context.Context, srv *Server) *mcp.ClientSession {
+	t.Helper()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	go func() {
+		srv.RunWithTransport(ctx, serverTransport) //nolint:errcheck
+	}()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error: %v", err)
+	}
+	t.Cleanup(func() { session.Close() })
+	return session
+}
+
 func TestIntegration(t *testing.T) {
-	// Create test skills
 	tmpDir := t.TempDir()
 	skillDir := filepath.Join(tmpDir, "greet")
 	if err := os.MkdirAll(skillDir, 0755); err != nil {
@@ -104,84 +167,46 @@ Say hello politely.
 		t.Fatalf("failed to write skill: %v", err)
 	}
 
-	// Set up registry and server
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	reg := registry.NewRegistry(tmpDir, logger)
-	if err := reg.Scan(); err != nil {
-		t.Fatalf("Scan() error: %v", err)
-	}
-
-	srv := New(reg, logger)
-
-	// Create in-memory transports for testing
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Start server in background
-	serverErr := make(chan error, 1)
-	go func() {
-		serverErr <- srv.RunWithTransport(ctx, serverTransport)
-	}()
+	srv := newTestServer(t, tmpDir)
+	session := connectClient(t, ctx, srv)
 
-	// Connect client
-	client := mcp.NewClient(&mcp.Implementation{
-		Name:    "test-client",
-		Version: "1.0.0",
-	}, nil)
-
-	session, err := client.Connect(ctx, clientTransport, nil)
+	prompts, err := session.ListPrompts(ctx, nil)
 	if err != nil {
-		t.Fatalf("client.Connect() error: %v", err)
+		t.Fatalf("ListPrompts() error: %v", err)
 	}
-	defer session.Close()
+	if len(prompts.Prompts) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts.Prompts))
+	}
+	if prompts.Prompts[0].Name != "greet" {
+		t.Errorf("expected prompt name 'greet', got %q", prompts.Prompts[0].Name)
+	}
 
-	// List tools
-	tools, err := session.ListTools(ctx, nil)
+	result, err := session.GetPrompt(ctx, &mcp.GetPromptParams{Name: "greet"})
 	if err != nil {
-		t.Fatalf("ListTools() error: %v", err)
+		t.Fatalf("GetPrompt() error: %v", err)
+	}
+	if len(result.Messages) == 0 {
+		t.Fatal("expected messages in result")
 	}
 
-	if len(tools.Tools) != 1 {
-		t.Errorf("expected 1 tool, got %d", len(tools.Tools))
-	}
-
-	if tools.Tools[0].Name != "greet" {
-		t.Errorf("expected tool name 'greet', got %q", tools.Tools[0].Name)
-	}
-
-	// Call the tool
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name: "greet",
-	})
-	if err != nil {
-		t.Fatalf("CallTool() error: %v", err)
-	}
-
-	if len(result.Content) == 0 {
-		t.Fatal("expected content in result")
-	}
-
-	textContent, ok := result.Content[0].(*mcp.TextContent)
+	textContent, ok := result.Messages[0].Content.(*mcp.TextContent)
 	if !ok {
-		t.Fatalf("expected TextContent, got %T", result.Content[0])
+		t.Fatalf("expected TextContent, got %T", result.Messages[0].Content)
 	}
-
 	if !strings.Contains(textContent.Text, "# Skill: greet") {
 		t.Error("response missing skill header")
 	}
 	if !strings.Contains(textContent.Text, "Say hello politely.") {
 		t.Error("response missing instructions")
 	}
-
-	cancel()
 }
 
 func TestIntegrationMultipleSkills(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Create multiple skills
 	skills := []struct {
 		name        string
 		description string
@@ -197,63 +222,106 @@ func TestIntegrationMultipleSkills(t *testing.T) {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("failed to create dir: %v", err)
 		}
-		content := "---\nname: " + s.name + "\ndescription: " + s.description + "\n---\n\n" + s.content + "\n"
-		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0644); err != nil {
+		md := "---\nname: " + s.name + "\ndescription: " + s.description + "\n---\n\n" + s.content + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(md), 0644); err != nil {
 			t.Fatalf("failed to write skill: %v", err)
 		}
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	reg := registry.NewRegistry(tmpDir, logger)
-	if err := reg.Scan(); err != nil {
-		t.Fatalf("Scan() error: %v", err)
-	}
-
-	srv := New(reg, logger)
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go func() {
-		srv.RunWithTransport(ctx, serverTransport)
-	}()
+	srv := newTestServer(t, tmpDir)
+	session := connectClient(t, ctx, srv)
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1.0.0"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
+	prompts, err := session.ListPrompts(ctx, nil)
 	if err != nil {
-		t.Fatalf("Connect() error: %v", err)
+		t.Fatalf("ListPrompts() error: %v", err)
 	}
-	defer session.Close()
-
-	// Verify all tools are listed
-	tools, err := session.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatalf("ListTools() error: %v", err)
+	if len(prompts.Prompts) != 3 {
+		t.Errorf("expected 3 prompts, got %d", len(prompts.Prompts))
 	}
 
-	if len(tools.Tools) != 3 {
-		t.Errorf("expected 3 tools, got %d", len(tools.Tools))
-	}
-
-	// Verify each tool can be called
 	for _, s := range skills {
-		result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: s.name})
+		result, err := session.GetPrompt(ctx, &mcp.GetPromptParams{Name: s.name})
 		if err != nil {
-			t.Errorf("CallTool(%s) error: %v", s.name, err)
+			t.Errorf("GetPrompt(%s) error: %v", s.name, err)
 			continue
 		}
-
-		textContent, ok := result.Content[0].(*mcp.TextContent)
+		textContent, ok := result.Messages[0].Content.(*mcp.TextContent)
 		if !ok {
 			t.Errorf("expected TextContent for %s", s.name)
 			continue
 		}
-
 		if !strings.Contains(textContent.Text, s.content) {
-			t.Errorf("tool %s response missing expected content", s.name)
+			t.Errorf("prompt %s response missing expected content", s.name)
 		}
 	}
+}
 
-	cancel()
+func TestIntegrationWithReferences(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillDir := filepath.Join(tmpDir, "code-review")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("failed to create skill dir: %v", err)
+	}
+
+	// Write reference file
+	checklistContent := "- [ ] Check correctness\n- [ ] Check security\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "checklist.md"), []byte(checklistContent), 0644); err != nil {
+		t.Fatalf("failed to write checklist: %v", err)
+	}
+
+	content := `---
+name: code-review
+description: Expert code review
+references:
+  - checklist.md
+---
+
+Review code carefully.
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write skill: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srv := newTestServer(t, tmpDir)
+	session := connectClient(t, ctx, srv)
+
+	// Prompt should include reference URIs
+	result, err := session.GetPrompt(ctx, &mcp.GetPromptParams{Name: "code_review"})
+	if err != nil {
+		t.Fatalf("GetPrompt() error: %v", err)
+	}
+	textContent := result.Messages[0].Content.(*mcp.TextContent)
+	if !strings.Contains(textContent.Text, "skill://code-review/checklist.md") {
+		t.Error("prompt missing reference URI")
+	}
+
+	// Resource should be listed
+	resources, err := session.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListResources() error: %v", err)
+	}
+	if len(resources.Resources) != 1 {
+		t.Fatalf("expected 1 resource, got %d", len(resources.Resources))
+	}
+	if resources.Resources[0].URI != "skill://code-review/checklist.md" {
+		t.Errorf("unexpected resource URI: %s", resources.Resources[0].URI)
+	}
+
+	// Resource should be readable
+	readResult, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "skill://code-review/checklist.md"})
+	if err != nil {
+		t.Fatalf("ReadResource() error: %v", err)
+	}
+	if len(readResult.Contents) == 0 {
+		t.Fatal("expected content in resource")
+	}
+	if readResult.Contents[0].Text != checklistContent {
+		t.Errorf("resource content = %q, want %q", readResult.Contents[0].Text, checklistContent)
+	}
 }

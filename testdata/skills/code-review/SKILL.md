@@ -1,6 +1,8 @@
 ---
 name: code-review
 description: Expert code review guidance for thorough and constructive feedback
+references:
+  - checklist.md
 ---
 
 # Code Review Skill

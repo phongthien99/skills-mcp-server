@@ -13,7 +13,8 @@ import (
 	"github.com/portertech/skills-mcp-server/pkg/skill"
 )
 
-const skillFileName = "SKILL.md"
+// skillFileName aliases the exported constant for internal use.
+const skillFileName = SkillFileName
 
 // Registry manages skill discovery and retrieval.
 type Registry struct {
@@ -66,6 +67,7 @@ func (r *Registry) Scan() error {
 		}
 
 		s.Path = filepath.Dir(path)
+		s.Instructions = "" // cleared: loaded lazily on demand
 
 		if existing, ok := r.skills[s.Name]; ok {
 			r.logger.Warn("duplicate skill name",

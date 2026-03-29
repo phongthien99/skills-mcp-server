@@ -9,6 +9,10 @@ type Skill struct {
 	// Description explains what the skill does (required).
 	Description string `yaml:"description"`
 
+	// References is an optional list of relative file paths within the skill directory.
+	// These files are exposed as MCP Resources for lazy reading by agents.
+	References []string `yaml:"references"`
+
 	// Instructions contains the markdown content after the YAML frontmatter.
 	Instructions string `yaml:"-"`
 
